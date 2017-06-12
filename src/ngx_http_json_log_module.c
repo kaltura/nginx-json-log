@@ -227,10 +227,17 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
                 {
                     continue;
                 }
+                
+                if (msg_id.len == 0) {
+                    msg_id.data = NULL;		// must set the data to null since librdkafka uses it to know if a key was passed
+                }
 
                 ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->pool->log, 0,
                     "http_json_log: kafka msg-id:[%v] msg:[%V]",
                     &msg_id, &txt);
+            } else {
+                msg_id.data = NULL;
+                msg_id.len = 0;
             }
 
             /* FIXME : Reconnect support */
@@ -248,7 +255,7 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
                 const char *errstr = rd_kafka_err2str(rd_kafka_errno2err(err));
 
                 ngx_log_error(NGX_LOG_ERR, r->pool->log, 0,
-                        "%% Failed to produce to topic %s "
+                        "failed to produce to topic %s "
                         "partition %i: %s\n",
                         rd_kafka_topic_name(location->kafka.rkt),
                         mcf->kafka.partition,
