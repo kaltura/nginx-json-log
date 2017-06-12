@@ -274,13 +274,15 @@ ngx_json_log_configure_kafka(ngx_pool_t *pool,
     /* configuration kafka constants */
     static const char *conf_client_id_key          = "client.id";
     static const char *conf_compression_codec_key  = "compression.codec";
-    static const char *conf_debug_key              = "debug";
     static const char *conf_log_level_key          = "log_level";
     static const char *conf_max_retries_key        = "message.send.max.retries";
     static const char *conf_buffer_max_msgs_key    = "queue.buffering.max.messages";
     static const char *conf_retry_backoff_ms_key   = "retry.backoff.ms";
     static const char *conf_bootstrap_servers_key  = "bootstrap.servers";
+#if (NGX_DEBUG)
+    static const char *conf_debug_key              = "debug";
     static ngx_str_t   conf_all_value              = ngx_string("all");
+#endif
 
     /* - default values - */
     static ngx_str_t  kafka_compression_default_value = ngx_string("snappy");
