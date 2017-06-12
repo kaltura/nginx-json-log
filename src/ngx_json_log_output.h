@@ -54,6 +54,7 @@ typedef struct {
     ngx_open_file_t                           *file;
 #if (NGX_HAVE_LIBRDKAFKA)
     ngx_json_log_kafka_conf_t                 kafka;
+    ngx_queue_t queue;
 #endif
 } ngx_json_log_output_location_t;
 
