@@ -31,55 +31,42 @@
 #include <ctype.h>
 #include <assert.h>
 
-#include "ngx_http_json_log_module.h"
-#include "ngx_json_log_str.h"
 #include "ngx_json_log_output.h"
-#include "ngx_json_log_text.h"
-#include "ngx_http_json_log_variables.h"
-
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
-
 #include "ngx_json_log_kafka.h"
 
-/*Global variable to indicate the we have kafka locations*/
+// typedefs
+typedef struct {
+#if (NGX_HAVE_LIBRDKAFKA)
+    ngx_json_log_main_kafka_conf_t kafka;
+#endif
+} ngx_http_json_log_main_conf_t;
+
+typedef struct {
+    ngx_array_t *locations;
+} ngx_http_json_log_loc_conf_t;
+
+// forward decls
+static char *ngx_http_json_log_loc_output(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void *ngx_http_json_log_create_main_conf(ngx_conf_t *cf);
+static char *ngx_http_json_log_init_main_conf(ngx_conf_t *cf, void *conf);
+static void *ngx_http_json_log_create_loc_conf(ngx_conf_t *cf);
+static char *ngx_http_json_log_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+static ngx_int_t ngx_http_json_log_post_config(ngx_conf_t *cf);
+
+// globals
+#if (NGX_HAVE_LIBRDKAFKA)
 static ngx_int_t   http_json_log_has_kafka_locations     = NGX_CONF_UNSET;
-/* configuration kafka constants */
 #endif
 
-/* Configuration callbacks */
-static char *
-ngx_http_json_log_loc_output(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-
-
-static void *        ngx_http_json_log_create_main_conf(ngx_conf_t *cf);
-static void *        ngx_http_json_log_create_loc_conf(ngx_conf_t *cf);
-
-static ngx_int_t     ngx_http_json_log_init_worker(ngx_cycle_t *cycle);
-static void          ngx_http_json_log_exit_worker(ngx_cycle_t *cycle);
-
-static ngx_int_t     ngx_http_json_log_pre_config(ngx_conf_t *cf);
-static ngx_int_t     ngx_http_json_log_post_config(ngx_conf_t *cf);
-
-/* json commands */
 static ngx_command_t ngx_http_json_log_commands[] = {
-    /* FORMAT */
-    { ngx_string("json_log_format"),
-        NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2|NGX_CONF_TAKE3,
-        ngx_http_json_log_main_format_block,
-        NGX_HTTP_MAIN_CONF_OFFSET,
-        0,
-        NULL
-    },
-    /* OUTPUT LOCATION */
     { ngx_string("json_log"),
-        NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+        NGX_HTTP_LOC_CONF|NGX_CONF_TAKE23,
         ngx_http_json_log_loc_output,
         NGX_HTTP_LOC_CONF_OFFSET,
         0,
         NULL
     },
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
-    /* KAFKA */
+#if (NGX_HAVE_LIBRDKAFKA)
     {
         ngx_string("json_log_kafka_client_id"),
         NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
@@ -91,7 +78,7 @@ static ngx_command_t ngx_http_json_log_commands[] = {
     {
         ngx_string("json_log_kafka_brokers"),
         NGX_HTTP_MAIN_CONF|NGX_CONF_1MORE,
-        ngx_conf_set_str_array_slot,
+        ngx_conf_set_str_slot,
         NGX_HTTP_MAIN_CONF_OFFSET,
         offsetof(ngx_http_json_log_main_conf_t, kafka.brokers),
         NULL
@@ -148,19 +135,17 @@ static ngx_command_t ngx_http_json_log_commands[] = {
     ngx_null_command
 };
 
-/* http_json_log config preparation */
 static ngx_http_module_t ngx_http_json_log_module_ctx = {
-    ngx_http_json_log_pre_config,          /* preconfiguration */
+    NULL,                                  /* preconfiguration */
     ngx_http_json_log_post_config,         /* postconfiguration */
     ngx_http_json_log_create_main_conf,    /* create main configuration */
-    NULL,                                  /* init main configuration */
+    ngx_http_json_log_init_main_conf,      /* init main configuration */
     NULL,                                  /* create server configuration */
     NULL,                                  /* merge server configuration */
     ngx_http_json_log_create_loc_conf,     /* create location configuration */
-    NULL                                   /* merge location configuration */
+    ngx_http_json_log_merge_loc_conf       /* merge location configuration */
 };
 
-/* http_json_log delivery */
 ngx_module_t ngx_http_json_log_module = {
     NGX_MODULE_V1,
     &ngx_http_json_log_module_ctx,         /* module context */
@@ -168,66 +153,29 @@ ngx_module_t ngx_http_json_log_module = {
     NGX_HTTP_MODULE,                       /* module type */
     NULL,                                  /* init master */
     NULL,                                  /* init module */
-    ngx_http_json_log_init_worker,         /* init process */
+    NULL,                                  /* init process */
     NULL,                                  /* init thread */
     NULL,                                  /* exit thread */
-    ngx_http_json_log_exit_worker,         /* exit process */
+    NULL,                                  /* exit process */
     NULL,                                  /* exit master */
     NGX_MODULE_V1_PADDING
 };
 
-/* Initialized stuff per http_json_log worker.*/
-static ngx_int_t
-ngx_http_json_log_init_worker(ngx_cycle_t *cycle) {
-
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
-    ngx_int_t rc = NGX_OK;
-    ngx_http_json_log_main_conf_t  *conf =
-        ngx_http_cycle_get_module_main_conf(cycle, ngx_http_json_log_module);
-
-    /* From this point we just are init kafka stuff */
-    if (http_json_log_has_kafka_locations == NGX_CONF_UNSET ) {
-        return NGX_OK;
-    }
-
-    rc = ngx_json_log_configure_kafka(cycle->pool, &conf->kafka);
-    if (rc != NGX_OK) {
-        return NGX_OK; //FIXME: What to do?
-    }
-#endif
-
-    return NGX_OK;
-}
-
-
-/* Things that a http_json_log maker must do before go home. */
-void
-ngx_http_json_log_exit_worker(ngx_cycle_t *cycle) {
-    //TODO: cleanup kafka stuff
-}
-
-
-/* log handler - format and print */
 static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
 
     ngx_http_json_log_loc_conf_t        *lc;
-    ngx_str_t                           filter_val;
-    char                                *txt;
+    ngx_str_t                           txt;
     size_t                              i;
     ngx_json_log_output_location_t     *arr;
     ngx_json_log_output_location_t     *location;
 
-
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
     int                                 err;
     ngx_http_json_log_main_conf_t       *mcf;
     ngx_str_t                           msg_id;
 #endif
+
     lc = ngx_http_get_module_loc_conf(r, ngx_http_json_log_module);
-    /* Location to eat http_json_log was not found */
-    if (!lc) {
-        return NGX_OK;
-    }
 
     /* Bypass if number of location is empty */
     if (!lc->locations->nelts) {
@@ -240,7 +188,7 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
         return NGX_OK;
     }
 
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
     mcf = ngx_http_get_module_main_conf(r, ngx_http_json_log_module);
 #endif
 
@@ -249,30 +197,8 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
 
         location = &arr[i];
 
-        if (!location) {
-            break;
-        }
-
-        /* Check filter result */
-        if (location->format.http_filter != NULL) {
-            if (ngx_http_complex_value(r,
-                        location->format.http_filter, &filter_val) != NGX_OK) {
-                /* WARN ? */
-                continue;
-            }
-
-            if (filter_val.len == 0
-                    || (filter_val.len == 1 && filter_val.data[0] == '0')) {
-                continue;
-            }
-        }
-
         /* Get json text for items at this request */
-        /*TODO: cache format output dump */
-        txt = ngx_json_log_items_dump_text(NGX_JSON_LOG_HTTP, r,
-                location->format.items);
-        if (!txt) {
-            /* WARN ? */
+        if (ngx_http_complex_value(r, &location->cv, &txt) != NGX_OK) {
             continue;
         }
 
@@ -283,47 +209,28 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
                 continue;
             }
 
-            if (ngx_json_log_write_sink_file(r->pool->log,
-                        location->file->fd, txt) == NGX_ERROR) {
-                ngx_log_error(NGX_LOG_EMERG, r->pool->log, 0, "Write Error!");
-            }
+            ngx_json_log_write_sink_file(
+                r->pool->log,
+                location->file,
+                &txt);
             continue;
         }
 
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
         /* Write to kafka */
         if (location->type == NGX_JSON_LOG_SINK_KAFKA) {
 
-
-            /* don't do anything if no kafka brokers to send */
-            if (! mcf->kafka.valid_brokers) {
-                continue;
-            }
-
-            if (location->kafka.rkt == NGX_CONF_UNSET_PTR ||
-                    !location->kafka.rkt)  {
-                /* configure and create topic */
-                location->kafka.rkt =
-                    ngx_json_log_kafka_topic_new(r->pool,
-                            mcf->kafka.rk, location->kafka.rktc,
-                            &location->location);
-            }
-
-            /* if failed to create topic */
-            if (!location->kafka.rkt) {
-                location->kafka.rkt = NGX_CONF_UNSET_PTR;
-                /* WARN ?*/
-                continue;
-            }
-
             if (location->kafka.http_msg_id_var) {
-                ngx_http_complex_value(r,
-                        location->kafka.http_msg_id_var, &msg_id);
-#if (NGX_DEBUG)
-                ngx_log_error(NGX_LOG_DEBUG, r->pool->log, 0,
-                        "http_json_log: kafka msg-id:[%v] msg:[%s]",
-                        &msg_id, txt);
-#endif
+                if (ngx_http_complex_value(r,
+                        location->kafka.http_msg_id_var,
+                        &msg_id) != NGX_OK)
+                {
+                    continue;
+                }
+
+                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->pool->log, 0,
+                    "http_json_log: kafka msg-id:[%v] msg:[%V]",
+                    &msg_id, &txt);
             }
 
             /* FIXME : Reconnect support */
@@ -332,14 +239,10 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
                             location->kafka.rkt,
                             mcf->kafka.partition,
                             RD_KAFKA_MSG_F_COPY,
-                            /* Payload and length */
-                            txt, strlen(txt),
-                            /* Optional key and its length */
-                            msg_id.data ? (const char *) msg_id.data: NULL,
+                            txt.data,
+                            txt.len,
+                            (const char *) msg_id.data,
                             msg_id.len,
-                            /* Message opaque, provided in
-                             * delivery report callback as
-                             * msg_opaque. */
                             NULL)) == -1) {
 
                 const char *errstr = rd_kafka_err2str(rd_kafka_errno2err(err));
@@ -351,16 +254,12 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
                         mcf->kafka.partition,
                         errstr);
             } else {
-
-#if (NGX_DEBUG)
-
-                if (mcf) {
-                    ngx_log_error(NGX_LOG_DEBUG, r->pool->log, 0,
-                            "http_json_log: kafka msg:[%s] ERR:[%d] QUEUE:[%d]",
-                            txt, err, rd_kafka_outq_len(mcf->kafka.rk));
-                }
-#endif
+                ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->pool->log, 0,
+                    "http_json_log: kafka msg:[%V] ERR:[%d] QUEUE:[%d]",
+                    &txt, err, rd_kafka_outq_len(mcf->kafka.rk));
             }
+
+            rd_kafka_poll(mcf->kafka.rk, 0);
 
         } // if KAFKA type
 #endif
@@ -370,20 +269,10 @@ static ngx_int_t ngx_http_json_log_log_handler(ngx_http_request_t *r) {
 }
 
 static ngx_int_t
-ngx_http_json_log_pre_config(ngx_conf_t *cf) {
-
-    ngx_http_json_log_register_variables(cf);
-    return NGX_OK;
-}
-
-static ngx_int_t
 ngx_http_json_log_post_config(ngx_conf_t *cf) {
 
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
-
-    /* Register custom json memory functions */
-    ngx_json_log_set_alloc_funcs();
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
@@ -406,18 +295,33 @@ ngx_http_json_log_create_main_conf(ngx_conf_t *cf) {
         return NULL;
     }
 
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
     if (ngx_json_log_init_kafka(cf->pool, &conf->kafka) != NGX_OK) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                 "http_json_log: error initialize kafka conf");
     }
 #endif
 
-    /* create the items array for formats */
-    conf->formats = ngx_array_create(cf->pool, 1,
-            sizeof(ngx_json_log_format_t));
-
     return conf;
+}
+
+static char *
+ngx_http_json_log_init_main_conf(ngx_conf_t *cf, void *cnf)
+{
+#if (NGX_HAVE_LIBRDKAFKA)
+    ngx_http_json_log_main_conf_t *conf = cnf;
+    ngx_int_t rc;
+
+    if (http_json_log_has_kafka_locations == NGX_CONF_UNSET ) {
+        return NGX_CONF_OK;
+    }
+
+    rc = ngx_json_log_configure_kafka(cf->pool, &conf->kafka);
+    if (rc != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+#endif
+    return NGX_CONF_OK;
 }
 
 static void *
@@ -430,15 +334,62 @@ ngx_http_json_log_create_loc_conf(ngx_conf_t *cf) {
         return NULL;
     }
 
-    /* create an array for the output locations */
     conf->locations = ngx_array_create(cf->pool, 1,
             sizeof(ngx_json_log_output_location_t));
+    if (conf->locations == NULL) {
+        return NULL;
+    }
 
     return conf;
 }
 
+static char *
+ngx_http_json_log_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+#if (NGX_HAVE_LIBRDKAFKA)
+    ngx_http_json_log_main_conf_t       *mcf;
+    ngx_http_json_log_loc_conf_t *conf = child;
+    ngx_json_log_output_location_t     *arr;
+    ngx_json_log_output_location_t     *location;
+    rd_kafka_topic_conf_t              *rktc;
+    size_t                              i;
 
-/* Register a output location destination for the HTTP location config
+    mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_json_log_module);
+
+    arr = conf->locations->elts;
+    for (i = 0; i < conf->locations->nelts; ++i) {
+
+        location = &arr[i];
+        if (location->kafka.rkt != NULL)
+        {
+            continue;
+        }
+
+        /* create topic conf */
+        rktc = ngx_json_log_kafka_topic_conf_new(cf->pool);
+        if (!rktc) {
+            return NGX_CONF_ERROR;
+        }
+
+        /* disable topic acks */
+        ngx_json_log_kafka_topic_disable_ack(cf->pool,
+                rktc);
+
+        location->kafka.rkt = ngx_json_log_kafka_topic_new(cf->pool,
+            mcf->kafka.rk,
+            rktc,
+            &location->location);
+        if (location->kafka.rkt == NULL)
+        {
+            return NGX_CONF_ERROR;
+        }
+    }
+#endif
+    return NGX_CONF_OK;
+}
+
+
+/* Register an output location destination for the HTTP location config
  * `json_log`
  *
  * Supported output destinations:
@@ -449,59 +400,28 @@ ngx_http_json_log_create_loc_conf(ngx_conf_t *cf) {
 static char *
 ngx_http_json_log_loc_output(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
 
+    ngx_http_compile_complex_value_t     ccv;
     ngx_http_json_log_loc_conf_t         *lc = conf;
-    ngx_http_json_log_main_conf_t        *mcf = NULL;
     ngx_json_log_output_location_t       *new_location = NULL;
-    ngx_json_log_format_t                *format;
     ngx_str_t                            *args = cf->args->elts;
     ngx_str_t                            *value = NULL;
-    ngx_str_t                            *format_name;
-    ngx_uint_t                            found = 0;
     size_t                                prefix_len;
-    size_t                                i;
 
-    if (! args) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "Invalid argument for HTTP log JSON output location");
+    new_location = ngx_array_push(lc->locations);
+    if (new_location == NULL) {
         return NGX_CONF_ERROR;
     }
 
-    mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_json_log_module);
-    if (!mcf) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "Missing main configuration");
-        return NGX_CONF_ERROR;
-    }
-
-    /* Check if format exists by name */
-    format_name = &args[2];
-    format = mcf->formats->elts;
-    for (i = 0; i < mcf->formats->nelts; i++) {
-        if (ngx_strncmp(format_name->data, format[i].name.data,
-                    format[i].name.len) == 0) {
-            found = 1;
-            break;
-        }
-    }
-
-    /* Do not accept unknown format names */
-    if (!found)  {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "http_json_log: Invalid format name [%V]",
-                format_name);
-        return NGX_CONF_ERROR;
-    }
+    ngx_memzero(new_location, sizeof(*new_location));
 
     value = &args[1];
 
     if (NGX_JSON_LOG_HAS_FILE_PREFIX(value)) {
-        new_location = ngx_array_push(lc->locations);
         new_location->type = NGX_JSON_LOG_SINK_FILE;
         prefix_len = NGX_JSON_LOG_FILE_OUT_LEN;
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
     }
     else if (NGX_JSON_LOG_HAS_KAFKA_PREFIX(value)) {
-        new_location = ngx_array_push(lc->locations);
         new_location->type = NGX_JSON_LOG_SINK_KAFKA;
         prefix_len = NGX_JSON_LOG_KAFKA_OUT_LEN;
 #endif
@@ -511,63 +431,50 @@ ngx_http_json_log_loc_output(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
         return NGX_CONF_ERROR;
     }
 
-    if (!new_location) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "Failed to add [%v] for HTTP log JSON output location", value);
+    /* compile the message body */
+    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+
+    ccv.cf = cf;
+    ccv.value = &args[2];
+    ccv.complex_value = &new_location->cv;
+    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
-    /* Saves location without prefix. */
+    /* saves location without prefix */
     new_location->location       = args[1];
     new_location->location.len   -= prefix_len;
     new_location->location.data  += prefix_len;
-    new_location->format         =  format[i];
 
-    /* If sink type is file, then try to open it and save */
+    /* if sink type is file, then try to open it and save */
     if (new_location->type == NGX_JSON_LOG_SINK_FILE) {
         new_location->file = ngx_conf_open_file(cf->cycle,
                 &new_location->location);
     }
 
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
-    /* If sink type is kafka, then set topic config for this location */
-    if (new_location->type == NGX_JSON_LOG_SINK_KAFKA) {
+#if (NGX_HAVE_LIBRDKAFKA)
+    /* if sink type is kafka, then set topic config for this location */
+    else if (new_location->type == NGX_JSON_LOG_SINK_KAFKA) {
 
-        /* create topic conf */
-        new_location->kafka.rktc = ngx_json_log_kafka_topic_conf_new(cf->pool);
-        if (! new_location->kafka.rktc) {
-            /* WARN ?*/
-            return NGX_CONF_ERROR;
-        }
-
-        /* disable topic acks */
-        ngx_json_log_kafka_topic_disable_ack(cf->pool,
-                new_location->kafka.rktc);
-
-        /* Set global variable */
+        /* set global variable */
         http_json_log_has_kafka_locations = NGX_OK;
 
-#if nginx_version >= 1011000
-        ngx_http_compile_complex_value_t     ccv;
-        /*FIXME: Change this to an user's configured variable */
-        ngx_str_t                  msg_id_variable = ngx_string("$request_id");
+        if (cf->args->nelts >= 4)
+        {
+            /* compile message id */
+            ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
 
-        /* Set variable for message id */
-        ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
-
-
-        ccv.cf = cf;
-        ccv.value = &msg_id_variable;
-        ccv.complex_value = ngx_pcalloc(cf->pool,
-                sizeof(ngx_http_complex_value_t));
-        if (ccv.complex_value == NULL) {
-            return NGX_CONF_ERROR;
+            ccv.cf = cf;
+            ccv.value = &args[3];
+            ccv.complex_value = ngx_pcalloc(cf->pool, sizeof(*ccv.complex_value));
+            if (ccv.complex_value == NULL) {
+                return NGX_CONF_ERROR;
+            }
+            if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+                return NGX_CONF_ERROR;
+            }
+            new_location->kafka.http_msg_id_var = ccv.complex_value;
         }
-        if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
-            return NGX_CONF_ERROR;
-        }
-        new_location->kafka.http_msg_id_var = ccv.complex_value;
-#endif
     }
 #endif
 

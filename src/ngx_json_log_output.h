@@ -27,7 +27,7 @@
 #define __NGX_JSON_LOG_OUTPUT_H__
 
 #include <ngx_core.h>
-#include "ngx_json_log_text.h"
+#include <ngx_http.h>
 #include "ngx_json_log_kafka.h"
 
 #define NGX_JSON_LOG_FILE_OUT_LEN (sizeof("file:") - 1)
@@ -36,36 +36,31 @@
                  "file:",                                   \
                  NGX_JSON_LOG_FILE_OUT_LEN) ==  0 )
 
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
 #define NGX_JSON_LOG_KAFKA_OUT_LEN (sizeof("kafka:") - 1)
 #define NGX_JSON_LOG_HAS_KAFKA_PREFIX(str)                  \
     (ngx_strncmp(str->data,                                 \
                  "kafka:",                                  \
                  NGX_JSON_LOG_KAFKA_OUT_LEN) ==  0 )
-#endif
 
 typedef enum {
     NGX_JSON_LOG_SINK_FILE = 0,
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
     NGX_JSON_LOG_SINK_KAFKA = 1
-#endif
 } ngx_json_log_sink_e;
 
-struct ngx_json_log_output_location_s {
+typedef struct {
     ngx_str_t                                 location;
     ngx_json_log_sink_e                       type;
-    ngx_json_log_format_t                     format;
+    ngx_http_complex_value_t                  cv;
     ngx_open_file_t                           *file;
-#ifdef HTTP_JSON_LOG_KAFKA_ENABLED
+#if (NGX_HAVE_LIBRDKAFKA)
     ngx_json_log_kafka_conf_t                 kafka;
 #endif
-};
+} ngx_json_log_output_location_t;
 
-typedef struct ngx_json_log_output_location_s ngx_json_log_output_location_t;
-
-ngx_int_t
-ngx_json_log_write_sink_file(ngx_log_t *log,
-        ngx_fd_t fd, const char *txt);
+ngx_int_t ngx_json_log_write_sink_file(
+    ngx_log_t *log,
+    ngx_open_file_t* file,
+    ngx_str_t* txt);
 
 #endif // __NGX_JSON_LOG_OUTPUT_H__
 
